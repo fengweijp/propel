@@ -40,19 +40,40 @@ function walkRecursiveWithAncestors(node, state, visitors) {
 }
 
 class MappedChar {
-  constructor(readonly char: string, readonly pos: number = null,
-              readonly file: string = null) {}
+  constructor(readonly char: string,
+              readonly file: SourceFile = null,
+              readonly line: number = null,
+              readonly column: number = null) {}
+}
+
+class SourceFile {
+  content: MappedString;
+
+  constructor(readonly name: string, content: string) {
+    const chars: MappedChar[] = [];
+    let line = 0, column = 0;
+    for (const char of content) {
+      chars.push(new MappedChar(char, this, line, column));
+      if (char === "\n") {
+        line++;
+        column = 0;
+      } else {
+        column++;
+      }
+    }
+    this.content = new MappedString(chars);
+  }
 }
 
 class MappedString {
   private chars: MappedChar[];
 
-  constructor(chars: string | MappedChar[] = "", file: string = null) {
+  constructor(chars: string | MappedChar[] = []) {
     if (typeof chars === "string") {
-      chars = Array.from(chars).map(
-        (char, pos) => new MappedChar(char, pos, file));
+      this.chars = Array.from(chars).map(char => new MappedChar(char));
+    } else {
+      this.chars = chars;
     }
-    this.chars = chars;
   }
 
   get length(): number {
@@ -75,14 +96,61 @@ class MappedString {
     return this.chars;
   }
 
+  getSourceMap(): any {
+    const sourcesMap = new Map<SourceFile, number>();
+    const sources = [];
+    const sourcesContent = [];
+    let mappings = "";
+
+    let genCol = 0, lastGenCol = 0;
+    let lastSrcLine = 0, lastSrcCol = 0, lastSrcIndex = 0;
+
+    for (const char of this.chars) {
+      if (char.file != null) {
+        // Ensire the source file is present in the `sources` and
+        // `sourcesContent` arrays.
+        let srcIndex = sourcesMap.get(char.file);
+        if (srcIndex == null) {
+          srcIndex = sources.length;
+          sourcesMap.set(char.file, srcIndex);
+          sources.push(char.file.name);
+          sourcesContent.push(char.file.content.toString());
+        }
+
+        if (/[^;]$/.test(mappings)) {
+          mappings += ",";
+        }
+
+        mappings += vlq(genCol - lastGenCol);
+        lastGenCol = genCol;
+
+        mappings += vlq(lastSrcIndex - srcIndex);
+        lastSrcIndex = srcIndex;
+
+        mappings += vlq(char.line - lastSrcLine);
+        lastSrcLine = char.line;
+
+        mappings += vlq(char.column - lastSrcCol);
+        lastSrcCol = char.column;
+      }
+
+      if (char.char === "\n") {
+        mappings += ";";
+        genCol = 0;
+        lastGenCol = 0;
+      } else {
+        genCol++;
+      }
+    }
+  }
+
   static EMPTY = new MappedString();
 
-  static convert(str: MappedStringLike,
-                 file: string = null): MappedString {
+  static convert(str: MappedStringLike): MappedString {
     if (str instanceof MappedString) {
       return str;
     } else {
-      return new MappedString(str, file);
+      return new MappedString(str);
     }
   }
 }
@@ -92,8 +160,8 @@ type MappedStringLike = string | MappedString;
 class SourceEditor {
   private index: MappedString[];
 
-  constructor(source: MappedStringLike, file: string = null) {
-    this.index = MappedString.convert(source, file).split();
+  constructor(source: MappedStringLike) {
+    this.index = MappedString.convert(source).split();
   }
 
   private merge(): MappedString {
@@ -112,7 +180,7 @@ class SourceEditor {
 
   dump() {
     for (const char of this.merge().toChars()) {
-      console.log("%s  @ %s %d", char.char, char.file, char.pos);
+      //
     }
   }
 
@@ -341,7 +409,8 @@ function parseAsyncWrapped(src) {
 //   })
 export function transpile(src: string): string {
   let body, root;
-  const edit = new SourceEditor(src, "file.js");
+  const sourceFile = new SourceFile("cell1", src);
+  const edit = new SourceEditor(sourceFile.content);
 
   // Wrap the source in an async function.
   edit.prepend(`(async (${globalVar}, ${importFn}, console) => {\n`);
